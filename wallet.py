@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from storage import get_user, add_transaction, get_all_transactions
 from models import Transaction
-from datetime import datetime, timedelta
+from datetime import datetime
 
 wallet_bp = Blueprint('wallet', __name__)
 
@@ -15,10 +15,12 @@ WITHDRAWAL_RATIO_LIMIT = 0.8
 def check_and_flag_fraud(tx):
     now = tx.timestamp
 
+    # Flag if amount exceeds threshold
     if tx.amount >= FRAUD_THRESHOLD:
         tx.flagged = True
         print(f"Large transaction flagged: {tx.amount}")
 
+    # Flag multiple quick transfers
     if tx.tx_type == "transfer":
         recent = [
             t for t in get_all_transactions()
@@ -30,6 +32,7 @@ def check_and_flag_fraud(tx):
             tx.flagged = True
             print(f"Multiple quick transfers flagged for {tx.from_user}")
 
+    # Flag large withdrawals
     if tx.tx_type == "withdraw":
         user = get_user(tx.from_user)
         original_balance = user.get_balance(tx.currency) + tx.amount
@@ -191,8 +194,26 @@ def get_transactions():
     if not user or user.deleted or user.blocked:
         return jsonify({"msg": "User not found or blocked"}), 404
 
-    transactions = [tx for tx in get_all_transactions() if tx.tx_id in user.transactions]
-    return jsonify([tx.__dict__ for tx in transactions]), 200
+    # Filter all transactions to those linked to this user
+    user_tx_ids = {tx.tx_id for tx in user.transactions}
+    transactions = [tx for tx in get_all_transactions() if tx.tx_id in user_tx_ids]
+
+    # Serialize transactions for response
+    tx_list = []
+    for tx in transactions:
+        tx_list.append({
+            'tx_id': tx.tx_id,
+            'from_user': tx.from_user,
+            'to_user': tx.to_user,
+            'amount': tx.amount,
+            'currency': tx.currency,
+            'tx_type': tx.tx_type,
+            'timestamp': tx.timestamp.isoformat(),
+            'flagged': tx.flagged,
+            'deleted': tx.deleted
+        })
+
+    return jsonify(tx_list), 200
 
 
 @wallet_bp.route('/admin/flagged', methods=['GET'])
@@ -204,4 +225,17 @@ def get_flagged_transactions():
         return jsonify({"msg": "Unauthorized"}), 403
 
     flagged = [tx for tx in get_all_transactions() if tx.flagged]
-    return jsonify([tx.__dict__ for tx in flagged]), 200
+    flagged_list = []
+    for tx in flagged:
+        flagged_list.append({
+            'tx_id': tx.tx_id,
+            'from_user': tx.from_user,
+            'to_user': tx.to_user,
+            'amount': tx.amount,
+            'currency': tx.currency,
+            'tx_type': tx.tx_type,
+            'timestamp': tx.timestamp.isoformat(),
+            'flagged': tx.flagged,
+            'deleted': tx.deleted
+        })
+    return jsonify(flagged_list), 200
