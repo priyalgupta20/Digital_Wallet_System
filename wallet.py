@@ -1,16 +1,42 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from storage import get_user, add_transaction
+from storage import get_user, add_transaction, get_all_transactions
 from models import Transaction
-from datetime import datetime
+from datetime import datetime, timedelta
 
 wallet_bp = Blueprint('wallet', __name__)
 
-FRAUD_THRESHOLD = 10000.0  # threshold for fraud detection
+FRAUD_THRESHOLD = 10000.0
+TRANSFER_LIMIT_COUNT = 3
+TRANSFER_TIME_WINDOW = 60  # seconds
+WITHDRAWAL_RATIO_LIMIT = 0.8
+
 
 def check_and_flag_fraud(tx):
+    now = tx.timestamp
+
     if tx.amount >= FRAUD_THRESHOLD:
         tx.flagged = True
+        print(f"Large transaction flagged: {tx.amount}")
+
+    if tx.tx_type == "transfer":
+        recent = [
+            t for t in get_all_transactions()
+            if t.from_user == tx.from_user
+            and t.tx_type == "transfer"
+            and (now - t.timestamp).total_seconds() < TRANSFER_TIME_WINDOW
+        ]
+        if len(recent) >= TRANSFER_LIMIT_COUNT:
+            tx.flagged = True
+            print(f"Multiple quick transfers flagged for {tx.from_user}")
+
+    if tx.tx_type == "withdraw":
+        user = get_user(tx.from_user)
+        original_balance = user.get_balance(tx.currency) + tx.amount
+        if original_balance > 0 and tx.amount / original_balance > WITHDRAWAL_RATIO_LIMIT:
+            tx.flagged = True
+            print(f"Large withdrawal flagged for {tx.from_user}")
+
 
 @wallet_bp.route('/balance', methods=['GET'])
 @jwt_required()
@@ -45,10 +71,8 @@ def deposit():
     if not user or user.deleted or user.blocked:
         return jsonify({"msg": "User not found or blocked"}), 404
 
-    # Update balance
     user.update_balance(currency, amount)
 
-    # Create transaction
     tx = Transaction(
         from_user=None,
         to_user=username,
@@ -64,7 +88,8 @@ def deposit():
 
     return jsonify({
         "msg": "Deposit successful",
-        "transaction_id": tx.tx_id
+        "transaction_id": tx.tx_id,
+        "flagged": tx.flagged
     }), 201
 
 
@@ -86,10 +111,8 @@ def withdraw():
     if user.get_balance(currency) < amount:
         return jsonify({"msg": "Insufficient funds"}), 400
 
-    # Update balance
     user.update_balance(currency, -amount)
 
-    # Create transaction
     tx = Transaction(
         from_user=username,
         to_user=None,
@@ -105,7 +128,8 @@ def withdraw():
 
     return jsonify({
         "msg": "Withdrawal successful",
-        "transaction_id": tx.tx_id
+        "transaction_id": tx.tx_id,
+        "flagged": tx.flagged
     }), 201
 
 
@@ -135,11 +159,9 @@ def transfer():
     if from_user.get_balance(currency) < amount:
         return jsonify({"msg": "Insufficient funds"}), 400
 
-    # Update balances
     from_user.update_balance(currency, -amount)
     to_user.update_balance(currency, amount)
 
-    # Create transaction
     tx = Transaction(
         from_user=from_username,
         to_user=to_username,
@@ -156,8 +178,10 @@ def transfer():
 
     return jsonify({
         "msg": "Transfer successful",
-        "transaction_id": tx.tx_id
+        "transaction_id": tx.tx_id,
+        "flagged": tx.flagged
     }), 201
+
 
 @wallet_bp.route('/transactions', methods=['GET'])
 @jwt_required()
@@ -169,6 +193,7 @@ def get_transactions():
 
     transactions = [tx for tx in get_all_transactions() if tx.tx_id in user.transactions]
     return jsonify([tx.__dict__ for tx in transactions]), 200
+
 
 @wallet_bp.route('/admin/flagged', methods=['GET'])
 @jwt_required()
